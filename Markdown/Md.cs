@@ -1,66 +1,77 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.ComponentModel.Design;
 using System.Linq;
+using System.Net.Http.Headers;
+using System.Security.Cryptography.X509Certificates;
 using NUnit.Framework;
 using FluentAssertions;
+using static System.ValueTuple;
 
 namespace Markdown
 {
     public class Md
     {
-        private static readonly Dictionary<string, Tuple<string, string>> SpecialSymbols
-            = new Dictionary<string, Tuple<string, string>>()
-            {
-                {"_", new Tuple<string, string>("<em>", "</em>")},
-                {"__", new Tuple<string, string>("<strong>", "</strong>")},
-                {"'", new Tuple<string, string>("<code>", "</code>")}
-            };
+        private readonly Dictionary<string, Tuple<string, string>> specialSymbols;
+        private readonly string escapeString;
+        private readonly Dictionary<string, List<string>> ecranizedSymbols;
+        private readonly (string open, string closed) defaultWrapper;
 
+        public Md(Dictionary<string, Tuple<string, string>> specialSymbols, string escapeString,
+            Dictionary<string, List<string>> ecranizedSymbols,
+            (string open, string closed) defaultWrapper)
+        {
+            this.specialSymbols = specialSymbols;
+            this.escapeString = escapeString;
+            this.ecranizedSymbols = ecranizedSymbols;
+            this.defaultWrapper = defaultWrapper;
+        }
 
         public string RenderToHtml(string markdown)
         {
             var words = markdown.Split(' ').ToList();
-            foreach (var specialSymbol in SpecialSymbols.Keys)
+            foreach (var specialSymbol in specialSymbols.Keys)
                 RenderSymbol(words, specialSymbol);
             WrapParagraphIntoCorrespondingTag(words);
             return string.Join(" ", words);
         }
 
-        private static void RenderSymbol(List<string> words, string symbol)
+        private void RenderSymbol(List<string> words, string symbol)
         {
             var stack = new Stack<int>();
-
             for (var i = 0; i < words.Count; i++)
             {
-                if (stack.Count != 0 && symbol == "_")
-                    EcranizeDoubleUnderscores(words, i);
+                if (stack.Count != 0 && ecranizedSymbols.ContainsKey(symbol))
+                    Ecranize(words, i, symbol);
 
-
-                if (words[i].StartsWith(@"\" + symbol))
+                if (StartsOnlyWith(words[i], escapeString + symbol))
                     words[i] = DeecranizeSymbolInTheStart(words[i]);
                 else if (StartsOnlyWith(words[i], symbol))
                     stack.Push(i);
 
-                if (words[i].EndsWith(@"\" + symbol))
+                if (EndsOnlyWith(words[i], escapeString + symbol))
                     words[i] = DeecranizeSymbolInTheEnd(words[i], symbol);
                 else if (EndsOnlyWith(words[i], symbol) && (stack.Count != 0))
                     RenderPairOfSymbols(words, stack, symbol, i);
             }
         }
 
-        private static void EcranizeDoubleUnderscores(List<string> words, int index)
+        private void Ecranize(List<string> words, int index, string symbol)
         {
-            if (words[index].StartsWith("__"))
-                words[index] = @"\" + words[index];
-            if (words[index].EndsWith("__"))
-                words[index] = words[index].Insert(words[index].Length - 2, @"\");
+            foreach (var toBeEcranized in ecranizedSymbols[symbol])
+            {
+                if (StartsOnlyWith(words[index], toBeEcranized))
+                    words[index] = escapeString + words[index];
+                if (EndsOnlyWith(words[index], toBeEcranized))
+                    words[index] = words[index].Insert(words[index].Length - 2, escapeString);
+            }
         }
 
-        private static bool EndsOnlyWith(string str, string suffix)
+        private bool EndsOnlyWith(string str, string suffix)
         {
             if (!str.EndsWith(suffix))
                 return false;
-            return SpecialSymbols.Keys.Where(key => !suffix.Contains(key)).All(key => !str.EndsWith(key));
+            return specialSymbols.Keys.Where(key => !suffix.Contains(key)).All(key => !str.EndsWith(key));
         }
 
         private static string DeecranizeSymbolInTheStart(string word)
@@ -73,34 +84,26 @@ namespace Markdown
             return word.Substring(0, word.Length - symbol.Length - 1) + symbol;
         }
 
-        private static bool StartsOnlyWith(string str, string prefix)
+        private bool StartsOnlyWith(string str, string prefix)
         {
             if (!str.StartsWith(prefix))
                 return false;
-            return SpecialSymbols.Keys.Where(key => !prefix.Contains(key)).All(key => !str.StartsWith(key));
+            return specialSymbols.Keys.Where(key => !prefix.Contains(key)).All(key => !str.StartsWith(key));
         }
 
-        private static void RenderPairOfSymbols(List<string> words, Stack<int> stack, string specialSymbol, int index)
+        private void RenderPairOfSymbols(List<string> words, Stack<int> stack, string specialSymbol, int index)
         {
-            words[stack.Peek()] = SpecialSymbols[specialSymbol].Item1
+            words[stack.Peek()] = specialSymbols[specialSymbol].Item1
                                   + words[stack.Peek()].Substring(specialSymbol.Length);
             words[index] = words[index].Substring(0, words[index].Length - specialSymbol.Length) +
-                           SpecialSymbols[specialSymbol].Item2;
+                           specialSymbols[specialSymbol].Item2;
             stack.Pop();
         }
 
-        private static void WrapParagraphIntoCorrespondingTag(List<string> words)
+        private void WrapParagraphIntoCorrespondingTag(List<string> words)
         {
-            if (words[0] == "#")
-            {
-                words[0] = "<h1>";
-                words.Add("</h1>");
-            }
-            else
-            {
-                words.Insert(0, "<p>");
-                words.Add("</p>");
-            }
+            words.Insert(0, defaultWrapper.open);
+            words.Add(defaultWrapper.closed);
         }
     }
 
@@ -125,12 +128,9 @@ namespace Markdown
         [TestCase("_Double __does not work__ inside of singular_", ExpectedResult =
             "<p> <em>Double __does not work__ inside of singular</em> </p>")]
         [TestCase("_Only _last _pair will close_", ExpectedResult = "<p> _Only _last <em>pair will close</em> </p>")]
-        [TestCase("# Hash means header", ExpectedResult = "<h1> Hash means header </h1>")]
-        [TestCase("#Hash should be separate word", ExpectedResult = "<p> #Hash should be separate word </p>")]
-        [TestCase("Hash should be # first word", ExpectedResult = "<p> Hash should be # first word </p>")]
         public string Render(string markdown)
         {
-            mdRenderer = new Md();
+            mdRenderer = CreateMd();
             return mdRenderer.RenderToHtml(markdown);
         }
 
@@ -140,8 +140,8 @@ namespace Markdown
         [TestCase(10000)]
         public void RenderNestedPairs(int numberOfPairs)
         {
-            mdRenderer = new Md();
-
+            mdRenderer = CreateMd();
+            
             var markdown = string.Concat(Enumerable.Repeat("_This ", numberOfPairs))
                            + string.Concat(Enumerable.Repeat("and that_ ", numberOfPairs));
             var expectedHtml = "<p> " + string.Concat(Enumerable.Repeat("<em>This ", numberOfPairs))
@@ -158,13 +158,35 @@ namespace Markdown
         [TestCase(10000)]
         public void NotNestedPairs(int numberOfPairs)
         {
-            mdRenderer = new Md();
+            mdRenderer = CreateMd();
 
             var markdown = string.Concat(Enumerable.Repeat("_This_ ", numberOfPairs));
             var expectedHtml = "<p> " + string.Concat(Enumerable.Repeat("<em>This</em> ", numberOfPairs)) + " </p>";
             var actualHtml = mdRenderer.RenderToHtml(markdown);
 
             actualHtml.Should().Be(expectedHtml);
+        }
+
+        private Md CreateMd()
+        {
+            var specialSymbols
+                = new Dictionary<string, Tuple<string, string>>()
+                {
+                    {"_", new Tuple<string, string>("<em>", "</em>")},
+                    {"__", new Tuple<string, string>("<strong>", "</strong>")},
+                    {"'", new Tuple<string, string>("<code>", "</code>")}
+                };
+
+            var escapeString = @"\";
+
+            var ecranizedSymbols = new Dictionary<string, List<string>>()
+            {
+                {"_", new List<string>() {"__"}}
+            };
+
+            var defaultWrapper = (open: "<p>", closed: "</p>");
+
+            return new Md(specialSymbols, escapeString, ecranizedSymbols, defaultWrapper);
         }
     }
 }
